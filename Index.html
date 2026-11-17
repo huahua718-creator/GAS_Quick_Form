@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: "Microsoft JhengHei", Arial, sans-serif; margin: 0; padding: 20px; background: #f4f6f8; color: #333; }
+    .container { max-width: 650px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+    h2 { text-align: center; color: #0056b3; margin-top: 0; word-break: break-all; }
+    .description { background: #f8f9fa; border-left: 4px solid #0056b3; padding: 15px; margin-bottom: 25px; white-space: pre-wrap; font-size: 14px; line-height: 1.6; }
+    .section { margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee; }
+    label { font-weight: bold; display: block; margin-bottom: 8px; }
+    input[type="text"], input[type="tel"], textarea { width: 100%; padding: 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; font-size: 15px; }
+    .option-group { margin: 8px 0; display: block; cursor: pointer; }
+    .btn { background: #007bff; color: white; border: none; padding: 12px; border-radius: 5px; cursor: pointer; width: 100%; font-size: 16px; font-weight: bold; margin-top: 15px; }
+    .btn:hover { background: #0056b3; }
+    .btn-secondary { background: #6c757d; margin-top: 8px; }
+    .btn-secondary:hover { background: #5a6268; }
+    .hidden { display: none; }
+    .info-card { background: #e9ecef; padding: 12px 18px; border-radius: 6px; margin-bottom: 20px; }
+    .price-tag { font-size: 20px; color: #d9534f; font-weight: bold; text-align: right; margin-top: 15px; }
+    .alert-message { text-align: center; color: #d9534f; font-size: 18px; padding: 40px 0; font-weight: bold; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2 id="doc-title">載入中...</h2>
+
+  <div id="status-message" class="alert-message hidden"></div>
+
+  <div id="main-app" class="hidden">
+    <div id="form-desc" class="description hidden"></div>
+
+    <!-- 步驟 1: 搜尋學號 -->
+    <div id="step-search" class="section">
+      <label for="studentIdInput">請輸入學號進行身分驗證：</label>
+      <input type="text" id="studentIdInput" placeholder="請輸入學號">
+      <button class="btn" onclick="checkStudent()">查詢資料</button>
+    </div>
+
+    <!-- 步驟 2: 動態表單 -->
+    <div id="step-form" class="hidden">
+      <div class="info-card">
+        <p style="margin: 4px 0;"><b>班級：</b><span id="info-class"></span> | <b>座號：</b><span id="info-seat"></span></p>
+        <p style="margin: 4px 0;"><b>姓名：</b><span id="info-name"></span> | <b>學號：</b><span id="info-id"></span></p>
+      </div>
+
+      <form id="dynamicForm">
+        <div id="questions-container"></div>
+        
+        <div id="live-price-container" class="price-tag hidden">
+          目前預估總金額：<span id="live-total">0</span> 元
+        </div>
+
+        <button type="button" class="btn" onclick="showConfirm()">下一步：確認資料</button>
+      </form>
+    </div>
+
+    <!-- 步驟 3: 確認資料 -->
+    <div id="step-confirm" class="hidden">
+      <h3>請確認您的報名資訊</h3>
+      <div id="confirm-details" class="info-card" style="background: #fff; border: 1px solid #ddd;"></div>
+      <button class="btn" id="btnSubmitFinal" onclick="submitData()">確認無誤送出</button>
+      <button class="btn btn-secondary" onclick="backToForm()">返回修改</button>
+    </div>
+
+    <!-- 步驟 4: 完成 -->
+    <div id="step-finish" class="hidden" style="text-align: center; padding: 20px 0;">
+      <h3 style="color: #28a745; font-size: 24px;">🎉 報名成功！</h3>
+      <p style="font-size: 18px;">您的應繳總金額為：<b><span id="final-fee">0</span> 元</b></p>
+      <p style="color: #666;">資料已成功儲存。</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  let formConfig = {};
+  let currentStudent = {};
+
+  window.onload = function() {
+    google.script.run.withSuccessHandler(function(config) {
+      formConfig = config;
+      document.getElementById('doc-title').innerText = config.docName;
+
+      if (config.status !== "active") {
+        document.getElementById('status-message').innerText = config.message;
+        document.getElementById('status-message').classList.remove('hidden');
+      } else {
+        document.getElementById('main-app').classList.remove('hidden');
+        if (config.description) {
+          document.getElementById('form-desc').innerText = config.description;
+          document.getElementById('form-desc').classList.remove('hidden');
+        }
+      }
+    }).getFormConfig();
+  };
+
+  function isTotalCol(q) {
+    if (!q) return false;
+    const typeStr = String(q.type || "").trim();
+    const titleStr = String(q.title || "").trim();
+    return typeStr.indexOf("總計") !== -1 || titleStr.indexOf("總計") !== -1;
+  }
+
+  function checkStudent() {
+    const id = document.getElementById('studentIdInput').value.trim();
+    if(!id) return alert('請輸入學號');
+
+    google.script.run.withSuccessHandler(function(res) {
+      if(!res.found) {
+        alert('查無此學號，請確認後重試。');
+        return;
+      }
+
+      // 取得學生基本資料 (相容不同資料結構)
+      const student = res.studentInfo || res;
+      currentStudent = student;
+
+      // 1. 若已經報名過，跳出通知提醒並允許載入舊紀錄修改
+      if(res.alreadyRegistered) {
+        alert('⚠️【載入上次報名紀錄】\n您已於 ' + res.registerTime + ' 完成報名！\n系統已自動為您載入填寫紀錄，您可以直接修改內容並重新送出覆蓋。');
+      }
+
+      // 2. 顯示學生基本資料
+      document.getElementById('info-class').innerText = student.className;
+      document.getElementById('info-seat').innerText = student.seatNo;
+      document.getElementById('info-name').innerText = student.name;
+      document.getElementById('info-id').innerText = student.studentId;
+
+      // 3. 渲染表單題目
+      renderQuestions();
+
+      // 4. 若有舊答題紀錄，自動帶入表單欄位中
+      if (res.alreadyRegistered && res.previousAnswers) {
+        loadPreviousAnswers(res.previousAnswers);
+      }
+
+      // 5. 動態更新最終確認按鈕文字
+      const btnSubmitFinal = document.getElementById('btnSubmitFinal');
+      if (btnSubmitFinal) {
+        btnSubmitFinal.innerText = res.alreadyRegistered ? '🔄 確認更新並送出' : '🚀 確認無誤送出';
+      }
+
+      // 6. 切換畫面
+      document.getElementById('step-search').classList.add('hidden');
+      document.getElementById('step-form').classList.remove('hidden');
+    }).searchStudent(id);
+  }
+
+  // 輔助函式：自動將舊答題紀錄帶入對應欄位 (正確比對欄位索引)
+  function loadPreviousAnswers(answers) {
+    if (!answers || !formConfig.questions) return;
+    
+    setTimeout(function() {
+      formConfig.questions.forEach(q => {
+        if (isTotalCol(q)) return;
+
+        const val = answers[q.title];
+        if (val === undefined || val === null || val === "") return;
+
+        const elements = document.querySelectorAll(`[name="q_${q.colIndex}"]`);
+        elements.forEach(el => {
+          if (el.type === 'checkbox' || el.type === 'radio') {
+            const valStr = Array.isArray(val) ? val.join(",") : String(val);
+            if (valStr.includes(el.value) || valStr === el.value) {
+              el.checked = true;
+            }
+          } else {
+            el.value = val;
+          }
+        });
+      });
+      calculateTotal(); // 載入答案後重新計算金額
+    }, 100);
+  }
+
+  function renderQuestions() {
+    const container = document.getElementById('questions-container');
+    container.innerHTML = '';
+    let hasPrice = false;
+
+    formConfig.questions.forEach((q) => {
+      if (isTotalCol(q)) return;
+
+      const sec = document.createElement('div');
+      sec.className = 'section';
+
+      const title = document.createElement('label');
+      title.innerText = q.title;
+      sec.appendChild(title);
+
+      if (q.type.includes("金額") || q.type.includes("折扣")) hasPrice = true;
+
+      if (q.type === "簡答") {
+        sec.innerHTML += `<input type="text" name="q_${q.colIndex}" required>`;
+      } else if (q.type === "段落") {
+        sec.innerHTML += `<textarea name="q_${q.colIndex}" rows="3"></textarea>`;
+      } else if (q.type.includes("單選")) {
+        q.options.forEach((opt, idx) => {
+          sec.innerHTML += `
+            <label class="option-group">
+              <input type="radio" name="q_${q.colIndex}" value="${opt}" ${idx===0?'checked':''} onchange="calculateTotal()"> ${opt}
+            </label>`;
+        });
+      } else if (q.type.includes("多選")) {
+        q.options.forEach((opt) => {
+          sec.innerHTML += `
+            <label class="option-group">
+              <input type="checkbox" name="q_${q.colIndex}" value="${opt}" onchange="calculateTotal()"> ${opt}
+            </label>`;
+        });
+      }
+      container.appendChild(sec);
+    });
+
+    if (hasPrice) {
+      document.getElementById('live-price-container').classList.remove('hidden');
+      calculateTotal();
+    }
+  }
+
+  function calculateTotal() {
+    let total = 0;
+    const questions = formConfig.questions || [];
+
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      if (q.type.includes("單選(金額)") || q.type.includes("單選:金額")) {
+        const selected = document.querySelector(`input[name="q_${q.colIndex}"]:checked`);
+        let price = selected ? parseNumber(selected.value) : 0;
+
+        if (i + 1 < questions.length && (questions[i + 1].type.includes("單選(折扣)") || questions[i + 1].type.includes("單選:折扣"))) {
+          const nextQ = questions[i + 1];
+          const discountSelected = document.querySelector(`input[name="q_${nextQ.colIndex}"]:checked`);
+          const rate = discountSelected ? parseDiscount(discountSelected.value) : 1;
+          price *= rate;
+        }
+        total += price;
+      } else if (q.type.includes("多選(金額)") || q.type.includes("多選:金額")) {
+        const checkedList = document.querySelectorAll(`input[name="q_${q.colIndex}"]:checked`);
+        checkedList.forEach(cb => {
+          total += parseNumber(cb.value);
+        });
+      }
+    }
+
+    document.getElementById('live-total').innerText = total;
+    return total;
+  }
+
+  function parseNumber(text) {
+    const match = String(text).match(/\((\d+)\)/);
+    return match ? parseFloat(match[1]) : 0;
+  }
+
+  function parseDiscount(text) {
+    const match = String(text).match(/\((\d+)\%\)/);
+    return match ? parseFloat(match[1]) / 100 : 1;
+  }
+
+  function showConfirm() {
+    const answers = {};
+    const answersByTitle = {};
+    let isValid = true;
+
+    formConfig.questions.forEach((q) => {
+      if (isTotalCol(q)) return;
+
+      if (q.type === "簡答" || q.type === "段落") {
+        const inputEl = document.querySelector(`[name="q_${q.colIndex}"]`);
+        const val = inputEl ? inputEl.value.trim() : "";
+        if (!val && q.type === "簡答") isValid = false;
+        answers[q.colIndex] = val;
+        answersByTitle[q.title] = val;
+      } else if (q.type.includes("單選")) {
+        const selected = document.querySelector(`input[name="q_${q.colIndex}"]:checked`);
+        const val = selected ? selected.value : "";
+        answers[q.colIndex] = val;
+        answersByTitle[q.title] = val;
+      } else if (q.type.includes("多選")) {
+        const checkedList = Array.from(document.querySelectorAll(`input[name="q_${q.colIndex}"]:checked`)).map(cb => cb.value);
+        answers[q.colIndex] = checkedList;
+        answersByTitle[q.title] = checkedList.join(", ");
+      }
+    });
+
+    if (!isValid) return alert('請填寫所有必填欄位');
+
+    currentStudent.answers = answersByTitle; // 送給後端 saveRegistration 的 key
+    currentStudent.rawAnswers = answers;
+    const total = calculateTotal();
+    currentStudent.totalAmount = total;
+
+    let detailsHtml = `
+      <p><b>姓名：</b>${currentStudent.name} (${currentStudent.className} - ${currentStudent.seatNo}號)</p>
+      <p><b>學號：</b>${currentStudent.studentId}</p><hr>
+    `;
+
+    formConfig.questions.forEach((q) => {
+      if (isTotalCol(q)) return;
+      const ans = answersByTitle[q.title];
+      detailsHtml += `<p><b>${q.title}：</b> ${ans || "無"}</p>`;
+    });
+
+    detailsHtml += `<hr><p style="font-size: 18px; color: #d9534f;"><b>應繳總金額： ${total} 元</b></p>`;
+
+    document.getElementById('confirm-details').innerHTML = detailsHtml;
+    document.getElementById('step-form').classList.add('hidden');
+    document.getElementById('step-confirm').classList.remove('hidden');
+  }
+
+  function backToForm() {
+    document.getElementById('step-confirm').classList.add('hidden');
+    document.getElementById('step-form').classList.remove('hidden');
+  }
+
+  function submitData() {
+    const btn = document.getElementById('btnSubmitFinal');
+    btn.disabled = true;
+    btn.innerText = "⏳ 傳送資料中...";
+
+    // 呼叫 GAS 後端的 saveRegistration 函式
+    google.script.run.withSuccessHandler(function(res) {
+      btn.disabled = false;
+      if(res && res.success) {
+        document.getElementById('final-fee').innerText = currentStudent.totalAmount || 0;
+        document.getElementById('step-confirm').classList.add('hidden');
+        document.getElementById('step-finish').classList.remove('hidden');
+      } else {
+        alert("❌ 儲存失敗：" + (res ? res.message : "未知錯誤"));
+        btn.innerText = "確認無誤送出";
+      }
+    }).saveRegistration(currentStudent);
+  }
+</script>
+</body>
+</html>

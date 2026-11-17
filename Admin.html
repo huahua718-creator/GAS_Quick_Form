@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: "Microsoft JhengHei", Arial, sans-serif; padding: 15px; background: #f8f9fa; color: #333; margin: 0; }
+    .form-group { margin-bottom: 15px; }
+    label { font-weight: bold; display: block; margin-bottom: 5px; }
+    input[type="text"], input[type="datetime-local"], textarea, select {
+      width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px;
+    }
+    textarea { resize: vertical; }
+    .card { background: white; border: 1px solid #dee2e6; border-radius: 6px; padding: 15px; margin-bottom: 15px; position: relative; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-weight: bold; background: #e9ecef; padding: 6px 10px; border-radius: 4px; }
+    .btn-group { display: flex; gap: 5px; }
+    .btn { padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px; }
+    .btn-primary { background: #0d6efd; color: white; }
+    .btn-success { background: #198754; color: white; }
+    .btn-danger { background: #dc3545; color: white; padding: 4px 8px; font-size: 12px; }
+    .btn-secondary { background: #6c757d; color: white; padding: 4px 8px; font-size: 12px; }
+    .hint-box { background: #e7f1ff; border-left: 4px solid #0d6efd; padding: 8px 10px; font-size: 12px; color: #084298; margin-top: 6px; }
+    .row { display: flex; gap: 10px; }
+    .col { flex: 1; }
+    #loading { text-align: center; font-size: 16px; padding: 30px; font-weight: bold; color: #666; }
+    .footer-actions { position: sticky; bottom: 0; background: white; padding: 10px 0; border-top: 1px solid #ddd; display: flex; gap: 10px; }
+  </style>
+</head>
+<body>
+
+<div id="loading">⏳ 正在載入現有題目與時間設定...</div>
+
+<div id="app" style="display: none;">
+  <!-- 基本設定區 -->
+  <div class="card">
+    <div class="form-group">
+      <label>📋 活動說明 (A1 儲存格)：</label>
+      <textarea id="descInput" rows="2" placeholder="請輸入表單頂部顯示的說明文字"></textarea>
+    </div>
+    <div class="row">
+      <div class="col form-group">
+        <label>⏰ 開放時間 (A2 儲存格)：</label>
+        <input type="datetime-local" id="startInput">
+      </div>
+      <div class="col form-group">
+        <label>⏳ 截止時間 (A3 儲存格)：</label>
+        <input type="datetime-local" id="endInput">
+      </div>
+    </div>
+  </div>
+
+  <hr>
+  <h3>📝 題目清單設定</h3>
+
+  <!-- 題目卡片容器 -->
+  <div id="questions-container"></div>
+
+  <!-- 操作按鈕區 -->
+  <div class="footer-actions">
+    <button class="btn btn-primary" onclick="addQuestionCard()">➕ 新增題目卡片</button>
+    <button class="btn btn-success" style="flex: 1;" onclick="saveConfig()">💾 儲存並同步至試算表</button>
+  </div>
+</div>
+
+<script>
+  let questions = [];
+
+  const TYPE_OPTIONS = [
+    "簡答", "段落", "單選", "多選",
+    "單選(金額)", "單選(折扣)", "多選(金額)", "總計"
+  ];
+
+  window.onload = function() {
+    google.script.run.withSuccessHandler(function(config) {
+      if(config) {
+        document.getElementById('descInput').value = config.description || '';
+        document.getElementById('startInput').value = config.startTime || '';
+        document.getElementById('endInput').value = config.endTime || '';
+        questions = config.questions || [];
+      }
+      if(questions.length === 0) {
+        addQuestionCard(); // 若無題目預設給一張
+      } else {
+        renderQuestions();
+      }
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    }).getFormAdminConfig();
+  };
+
+  function renderQuestions() {
+    const container = document.getElementById('questions-container');
+    container.innerHTML = '';
+
+    questions.forEach((q, index) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      let optionsSelectHtml = TYPE_OPTIONS.map(opt => 
+        `<option value="${opt}" ${q.type === opt ? 'selected' : ''}>${opt}</option>`
+      ).join('');
+
+      card.innerHTML = `
+        <div class="card-header">
+          <span>題目 #${index + 1}</span>
+          <div class="btn-group">
+            <button class="btn btn-secondary" onclick="moveCard(${index}, -1)" ${index === 0 ? 'disabled' : ''}>⬆️ 上移</button>
+            <button class="btn btn-secondary" onclick="moveCard(${index}, 1)" ${index === questions.length - 1 ? 'disabled' : ''}>⬇️ 下移</button>
+            <button class="btn btn-danger" onclick="deleteCard(${index})">🗑️ 刪除</button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col form-group" style="flex: 2;">
+            <label>題目名稱：</label>
+            <input type="text" value="${escapeHtml(q.title || '')}" oninput="updateQ(${index}, 'title', this.value)" placeholder="請輸入題目名稱">
+          </div>
+          <div class="col form-group" style="flex: 1;">
+            <label>題目類型：</label>
+            <select onchange="updateQ(${index}, 'type', this.value); renderQuestions();">
+              ${optionsSelectHtml}
+            </select>
+          </div>
+        </div>
+        ${renderOptionInput(q, index)}
+      `;
+
+      container.appendChild(card);
+    });
+  }
+
+  function renderOptionInput(q, index) {
+    if (q.type === "簡答" || q.type === "段落" || q.type === "總計") {
+      return '';
+    }
+
+    let hint = '';
+    if (q.type === "單選(金額)" || q.type === "多選(金額)") {
+      hint = '<div class="hint-box">💡 範例格式：<code>排骨飯(100), 雞腿飯(110)</code></div>';
+    } else if (q.type === "單選(折扣)") {
+      hint = '<div class="hint-box">💡 <b>提示：此折扣將會直接計算『前一題』所設定的金額。</b><br>範例格式：<code>8折(80%), 9折(90%), 原價(100%)</code></div>';
+    } else {
+      hint = '<div class="hint-box">💡 請以逗號分隔選項，例：<code>選項A, 選項B, 選項C</code></div>';
+    }
+
+    return `
+      <div class="form-group">
+        <label>選項內容 (英文逗號分隔)：</label>
+        <input type="text" value="${escapeHtml(q.options || '')}" oninput="updateQ(${index}, 'options', this.value)" placeholder="例如：選項A, 選項B">
+        ${hint}
+      </div>
+    `;
+  }
+
+  function updateQ(index, key, val) {
+    questions[index][key] = val;
+  }
+
+  function addQuestionCard() {
+    questions.push({ title: '', type: '單選', options: '' });
+    renderQuestions();
+  }
+
+  function deleteCard(index) {
+    if(confirm('確定要刪除這道題目嗎？')) {
+      questions.splice(index, 1);
+      renderQuestions();
+    }
+  }
+
+  function moveCard(index, direction) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= questions.length) return;
+    const temp = questions[index];
+    questions[index] = questions[targetIndex];
+    questions[targetIndex] = temp;
+    renderQuestions();
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/"/g, '&quot;');
+  }
+
+  function saveConfig() {
+    const payload = {
+      description: document.getElementById('descInput').value.trim(),
+      startTime: document.getElementById('startInput').value,
+      endTime: document.getElementById('endInput').value,
+      questions: questions
+    };
+
+    google.script.run.withSuccessHandler(function(res) {
+      if(res.success) {
+        alert('✅ 設定已成功更新並已自動同步所有班級表頭！');
+        google.script.host.close();
+      }
+    }).saveFormAdminConfig(payload);
+  }
+</script>
+</body>
+</html>

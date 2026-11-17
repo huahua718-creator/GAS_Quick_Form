@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: "標楷體", "DFKai-SB", "Traditional Chinese", sans-serif;
+      margin: 15px;
+      color: #000;
+      background-color: #f4f6f9;
+    }
+    
+    /* 操作控制區（列印時自動隱藏） */
+    .no-print {
+      background: #ffffff;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .form-group {
+      margin-bottom: 10px;
+      display: inline-block;
+      margin-right: 15px;
+    }
+    label {
+      font-weight: bold;
+      font-family: system-ui, -apple-system, sans-serif;
+      margin-right: 5px;
+    }
+    select, input {
+      padding: 6px 10px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    .btn {
+      background-color: #1a73e8;
+      color: white;
+      border: none;
+      padding: 7px 15px;
+      font-size: 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .btn:hover { background-color: #1557b0; }
+    .btn-print { background-color: #34a853; }
+    .btn-print:hover { background-color: #2d8e47; }
+
+    /* 單張收據列印樣式 */
+    .receipt-card {
+      width: 85%;
+      margin: 0 auto 25px auto;
+      padding: 20px 30px;
+      border: 1px solid #000;
+      box-sizing: border-box;
+      background: #fff;
+      page-break-inside: avoid; /* 避免單張收據跨頁裁切 */
+    }
+    
+    .receipt-title {
+      text-align: center;
+      font-size: 24px;
+      font-weight: bold;
+      letter-spacing: 10px;
+      margin-bottom: 25px;
+    }
+
+    .receipt-line {
+      font-size: 18px;
+      line-height: 2.2;
+      margin-bottom: 8px;
+    }
+
+    .underline {
+      display: inline-block;
+      border-bottom: 1px solid #000;
+      padding: 0 15px;
+      text-align: center;
+      font-weight: bold;
+    }
+
+    .stamp-box {
+      margin-top: 20px;
+      text-align: right;
+      font-size: 14px;
+      color: #333;
+    }
+
+    /* 列印專用樣式 */
+    @media print {
+      .no-print { display: none !important; }
+      body { background: #fff; margin: 0; padding: 0; }
+      .receipt-card {
+        width: 100%;
+        margin-bottom: 20px;
+        border: 1px dashed #444; /* 虛線方便裁切 */
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 控制面板 (列印時自動隱藏) -->
+  <div class="no-print">
+    <div class="form-group">
+      <label for="classSelect">列印對象：</label>
+      <select id="classSelect"><option value="">載入中...</option></select>
+    </div>
+
+    <div class="form-group">
+      <label for="itemTitle">收費項目名稱：</label>
+      <input type="text" id="itemTitle" placeholder="例如：美術競賽裱框費用" value="活動報名費用" style="width: 200px;">
+    </div>
+
+    <button class="btn" onclick="generateReceipts()">產生收據</button>
+    <button class="btn btn-print" onclick="window.print()" id="btnPrint" style="display:none;">🖨️ 列印 / 存為 PDF</button>
+    
+    <div style="margin-top: 8px; font-size: 12px; color: #666; font-family: system-ui;">
+      💡 提示：點擊「列印」後，可在印表機設定中調整「每張紙的版面數量」（如一頁放 2 張或 4 張收據）。
+    </div>
+  </div>
+
+  <!-- 收據產出區域 -->
+  <div id="receiptContainer"></div>
+
+  <script>
+    window.onload = function() {
+      google.script.run.withSuccessHandler(function(classes) {
+        const select = document.getElementById('classSelect');
+        select.innerHTML = '';
+        classes.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c;
+          opt.textContent = c === "ALL" ? "🌟 全校所有班級 (批次列印)" : c + " 班";
+          select.appendChild(opt);
+        });
+      }).getClassListForReceipt();
+    };
+
+    function generateReceipts() {
+      const className = document.getElementById('classSelect').value;
+      const itemTitle = document.getElementById('itemTitle').value.trim() || "活動報名費用";
+      const container = document.getElementById('receiptContainer');
+      
+      if (!className) {
+        alert("請選擇列印對象！");
+        return;
+      }
+
+      container.innerHTML = '<div style="text-align:center; padding:20px; font-family:system-ui;">⏳ 正在讀取『表單回復』並彙整收據資料...</div>';
+
+      google.script.run.withSuccessHandler(function(res) {
+        if (res.error) {
+          container.innerHTML = '<div style="color:red; text-align:center; font-family:system-ui; padding:20px;">❌ ' + res.error + '</div>';
+          document.getElementById('btnPrint').style.display = 'none';
+          return;
+        }
+
+        let html = '';
+        res.receipts.forEach(r => {
+          html += `
+            <div class="receipt-card">
+              <div class="receipt-title">收 據</div>
+              
+              <div class="receipt-line">
+                茲收到 <span class="underline" style="min-width: 90px;">${r.className} 班</span> 
+                <span class="underline" style="min-width: 110px;">${r.name}</span>
+              </div>
+              
+              <div class="receipt-line">
+                ${r.itemTitle}
+              </div>
+              
+              <div class="receipt-line">
+                新臺幣 <span class="underline" style="min-width: 100px;">${r.amount.toLocaleString()}</span> 元整無訛。
+              </div>
+
+              <div class="stamp-box">
+                （承辦單位蓋章處）
+              </div>
+            </div>
+          `;
+        });
+
+        container.innerHTML = html;
+        document.getElementById('btnPrint').style.display = 'inline-block';
+      }).getReceiptDataAll(className, itemTitle);
+    }
+  </script>
+</body>
+</html>
