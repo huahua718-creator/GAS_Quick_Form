@@ -255,7 +255,118 @@ function initClassSheets() {
   SpreadsheetApp.getUi().alert("✅ 班級分頁已建立完成！\n已更新 A1 班級標題，並於底部自動加入金額加總公式。");
 }
 
-// 批次匯出各班獨立試算表並 Email 寄給導師 (適應新版第 2 列表頭結構)
+// 依班級名稱尋找對應的班級分頁（容許前後空白與「班」字尾差異）
+function findClassSheet_(ss, className) {
+  const normalized = String(className || "").trim();
+  if (!normalized) return null;
+
+  const exact = ss.getSheetByName(normalized);
+  if (exact) return exact;
+
+  const altName = normalized.endsWith("班")
+    ? normalized.slice(0, -1).trim()
+    : normalized + "班";
+
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    const sName = sheets[i].getName().trim();
+    if (sName === normalized || (altName && sName === altName)) {
+      return sheets[i];
+    }
+  }
+  return null;
+}
+
+// 偵測班級分頁的表頭列位置（優先檢查第 2 列，兼容第 1 列或第 3 列）
+function detectClassHeaderRow_(classSheet, lastRow, lastCol) {
+  const maxCheckRow = Math.min(3, lastRow);
+  const candidates = [];
+  if (maxCheckRow >= 2) candidates.push(2);
+  candidates.push(1);
+  if (maxCheckRow >= 3) candidates.push(3);
+
+  const headerKeywords = ["時間", "學號", "姓名", "座號"];
+  for (let i = 0; i < candidates.length; i++) {
+    const r = candidates[i];
+    const rowValues = classSheet.getRange(r, 1, 1, lastCol).getValues()[0];
+    const matched = rowValues.some(cell => {
+      const text = String(cell || "").trim();
+      return headerKeywords.indexOf(text) !== -1 || text.indexOf("時間") !== -1;
+    });
+    if (matched) {
+      return { rowIndex: r, headers: rowValues };
+    }
+  }
+
+  const fallbackRow = lastRow >= 2 ? 2 : 1;
+  return {
+    rowIndex: fallbackRow,
+    headers: classSheet.getRange(fallbackRow, 1, 1, lastCol).getValues()[0]
+  };
+}
+
+// 在已修剪空白的表頭陣列中尋找「時間」欄位索引 (0-based，找不到回傳 -1)
+function findTimeColIndex_(trimmedHeaders) {
+  const exactIdx = trimmedHeaders.indexOf("時間");
+  if (exactIdx !== -1) return exactIdx;
+  return trimmedHeaders.findIndex(h => h.indexOf("時間") !== -1);
+}
+
+// 檢查班級分頁是否有學生報名／填寫資料（排除合計列）
+function hasClassSubmission_(classSheet, headerInfo, rawProfileHeaders) {
+  const lastRow = classSheet.getLastRow();
+  const lastCol = classSheet.getLastColumn();
+  if (lastRow <= headerInfo.rowIndex || lastCol === 0) return false;
+
+  const trimmedHeaders = headerInfo.headers.map(h => String(h || "").trim());
+  const timeColIdx = findTimeColIndex_(trimmedHeaders);
+
+  const checkColIndices = [];
+  if (timeColIdx !== -1) {
+    // 檢查「時間」欄及其後的題目欄位（若任一有填寫即視為有報名資料）
+    for (let c = timeColIdx; c < trimmedHeaders.length; c++) {
+      if (trimmedHeaders[c] !== "" || c === timeColIdx) {
+        checkColIndices.push(c);
+      }
+    }
+  } else {
+    // 若找不到「時間」欄，則檢查基本資料欄位以外的所有欄位
+    const baseSet = new Set(["班級", "座號", "學號", "姓名", "生日", "性別", "身分證字號"]);
+    (rawProfileHeaders || []).forEach(h => {
+      const t = String(h || "").trim();
+      if (t) baseSet.add(t);
+    });
+    for (let c = 0; c < trimmedHeaders.length; c++) {
+      if (trimmedHeaders[c] && !baseSet.has(trimmedHeaders[c])) {
+        checkColIndices.push(c);
+      }
+    }
+  }
+
+  if (checkColIndices.length === 0) return false;
+
+  const dataRowCount = lastRow - headerInfo.rowIndex;
+  const rows = classSheet.getRange(headerInfo.rowIndex + 1, 1, dataRowCount, lastCol).getValues();
+
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    // 排除底部的「合計」列，避免 =SUM 公式結果誤判
+    const leadCells = row.slice(0, Math.min(3, row.length)).map(v => String(v || "").trim());
+    if (leadCells.indexOf("合計") !== -1) continue;
+
+    for (let k = 0; k < checkColIndices.length; k++) {
+      const val = row[checkColIndices[k]];
+      if (val instanceof Date) return true;
+      if (String(val === null || val === undefined ? "" : val).trim() !== "") {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+// 批次匯出各班獨立試算表並 Email 寄給導師 (適應新版第 2 列表頭結構，並相容班級名稱與表頭位置差異)
 function exportAndEmailSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const docName = ss.getName();
@@ -281,67 +392,83 @@ function exportAndEmailSheets() {
 
   if (confirm !== ui.Button.YES) return;
 
+  const teacherHeaders = teacherData[0].map(h => String(h || "").trim());
+  const tClassIdx = teacherHeaders.indexOf("班級") !== -1 ? teacherHeaders.indexOf("班級") : 0;
+  const tNameIdx = teacherHeaders.indexOf("導師") !== -1 ? teacherHeaders.indexOf("導師") : 1;
+  let tEmailIdx = teacherHeaders.findIndex(h => h.toLowerCase().indexOf("email") !== -1 || h.indexOf("信箱") !== -1 || h.indexOf("郵件") !== -1);
+  if (tEmailIdx === -1) tEmailIdx = 2;
+
+  const rawSheet = ss.getSheetByName("原始名單");
+  const rawProfileHeaders = (rawSheet && rawSheet.getLastRow() >= 1 && rawSheet.getLastColumn() >= 2)
+    ? rawSheet.getRange(1, 2, 1, rawSheet.getLastColumn() - 1).getValues()[0]
+    : [];
+
   let successCount = 0;
   let skipCount = 0;
   let failCount = 0;
   let logs = [];
 
   for (let i = 1; i < teacherData.length; i++) {
-    const className = String(teacherData[i][0]).trim();
-    const teacherName = String(teacherData[i][1]).trim();
-    const email = String(teacherData[i][2]).trim();
+    const className = String(teacherData[i][tClassIdx] || "").trim();
+    const teacherName = String(teacherData[i][tNameIdx] || "").trim();
+    const email = String(teacherData[i][tEmailIdx] || "").trim();
 
-    if (!className || !email) continue;
+    if (!className) continue;
 
-    const classSheet = ss.getSheetByName(className);
-    
-    if (!classSheet || classSheet.getLastRow() <= 2) {
-      logs.push(`⏭️ 跳過 ${className}班：分頁不存在或無學生名單`);
+    const classLabel = className.indexOf("班") !== -1 ? className : `${className}班`;
+
+    if (!email) {
+      logs.push(`⏭️ 跳過 ${classLabel} (${teacherName || "未填導師"})：未填寫 Email`);
       skipCount++;
       continue;
     }
 
-    // 表頭在第 2 列，檢查「時間」欄位是否有填寫紀錄
-    const headers = classSheet.getRange(2, 1, 1, classSheet.getLastColumn()).getValues()[0];
-    const timeColIndex = headers.indexOf("時間") + 1;
+    const classSheet = findClassSheet_(ss, className);
 
-    let hasSubmission = false;
-    if (timeColIndex > 0 && classSheet.getLastRow() >= 3) {
-      const timeValues = classSheet.getRange(3, timeColIndex, classSheet.getLastRow() - 2, 1).getValues();
-      hasSubmission = timeValues.some(row => String(row[0]).trim() !== "");
+    if (!classSheet || classSheet.getLastRow() <= 1 || classSheet.getLastColumn() === 0) {
+      logs.push(`⏭️ 跳過 ${classLabel}：分頁不存在或無學生名單`);
+      skipCount++;
+      continue;
     }
 
+    const headerInfo = detectClassHeaderRow_(classSheet, classSheet.getLastRow(), classSheet.getLastColumn());
+    if (classSheet.getLastRow() <= headerInfo.rowIndex) {
+      logs.push(`⏭️ 跳過 ${classLabel}：無學生名單資料`);
+      skipCount++;
+      continue;
+    }
+
+    const hasSubmission = hasClassSubmission_(classSheet, headerInfo, rawProfileHeaders);
     if (!hasSubmission) {
-      logs.push(`⏭️ 跳過 ${className}班 (${teacherName})：目前尚無學生完成報名`);
+      logs.push(`⏭️ 跳過 ${classLabel} (${teacherName})：目前尚無學生完成報名`);
       skipCount++;
       continue;
     }
 
     try {
-      const newFileName = `${docName} - ${className}班 報名統計`;
+      const newFileName = `${docName} - ${classLabel} 報名統計`;
       const newSs = SpreadsheetApp.create(newFileName);
+      const defaultSheet = newSs.getSheets()[0];
 
       const copiedSheet = classSheet.copyTo(newSs);
-      copiedSheet.setName(className);
-
-      const defaultSheet = newSs.getSheetByName("工作表1") || newSs.getSheetByName("Sheet1");
-      if (defaultSheet) {
+      if (defaultSheet && defaultSheet.getSheetId() !== copiedSheet.getSheetId()) {
         newSs.deleteSheet(defaultSheet);
       }
+      copiedSheet.setName(classSheet.getName());
 
       newSs.addViewer(email);
       const fileUrl = newSs.getUrl();
 
-      const subject = `【報名統計通知】${docName} - ${className}班 學生報名結果`;
+      const subject = `【報名統計通知】${docName} - ${classLabel} 學生報名結果`;
       const body = `${teacherName} 老師您好：\n\n` +
-                   `這是貴班（${className}班）在「${docName}」活動的學生最新報名統計表：\n\n` +
+                   `這是貴班（${classLabel}）在「${docName}」活動的學生最新報名統計表：\n\n` +
                    `🔗 統計表連結：\n${fileUrl}\n\n` +
                    `此信件為系統自動發送，點擊連結即可即時查看學生報名狀況。`;
 
       MailApp.sendEmail(email, subject, body);
       successCount++;
     } catch (e) {
-      logs.push(`❌ ${className}班 (${teacherName}) 處理失敗：${e.message}`);
+      logs.push(`❌ ${classLabel} (${teacherName}) 處理失敗：${e.message}`);
       failCount++;
     }
   }
@@ -505,19 +632,32 @@ function searchStudent(studentId) {
 function saveRegistration(formData) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const respSheet = ss.getSheetByName("表單回復");
-  const classSheet = ss.getSheetByName(formData.className);
+  const classSheet = findClassSheet_(ss, formData.className);
   const nowStr = Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm:ss");
 
   if (!respSheet || !classSheet) return { success: false, message: "資料表結構異常！" };
 
   // A. 寫入或更新「表單回復」分頁
-  const respHeaders = respSheet.getRange(4, 1, 1, respSheet.getLastColumn()).getValues()[0];
+  const respLastCol = respSheet.getLastColumn();
+  const respHeaders = respSheet.getRange(4, 1, 1, respLastCol).getValues()[0];
+  const respTypes = respSheet.getRange(2, 1, 1, respLastCol).getValues()[0];
   const rowData = [formData.className, formData.seatNo, formData.studentId, formData.name, nowStr];
+  const totalTitleSet = new Set();
 
-  // 依照題目順序填入答案
+  // 依照題目順序填入答案（含總計欄位）
   for (let c = 5; c < respHeaders.length; c++) {
-    const qTitle = respHeaders[c];
-    rowData.push(formData.answers[qTitle] || "");
+    const rawTitle = respHeaders[c];
+    const qTitle = String(rawTitle || "").trim();
+    const qType = String(respTypes[c] || "").trim();
+    if (isTotalCol({ title: qTitle, type: qType })) {
+      totalTitleSet.add(qTitle);
+      rowData.push(formData.totalAmount !== undefined ? formData.totalAmount : "");
+    } else {
+      const ans = formData.answers[rawTitle] !== undefined
+        ? formData.answers[rawTitle]
+        : (formData.answers[qTitle] !== undefined ? formData.answers[qTitle] : "");
+      rowData.push(ans);
+    }
   }
 
   // 尋找是否已存在「表單回復」中
@@ -541,29 +681,46 @@ function saveRegistration(formData) {
   }
 
   // B. 同步更新「班級分頁」
-  const classHeaders = classSheet.getRange(2, 1, 1, classSheet.getLastColumn()).getValues()[0];
-  const classData = classSheet.getRange(3, 1, classSheet.getLastRow() - 2, classSheet.getLastColumn()).getValues();
-  
-  let targetClassRow = -1;
-  const idColIdx = classHeaders.indexOf("學號");
+  const classLastRow = classSheet.getLastRow();
+  const classLastCol = classSheet.getLastColumn();
+  if (classLastRow > 1 && classLastCol > 0) {
+    const headerInfo = detectClassHeaderRow_(classSheet, classLastRow, classLastCol);
+    const trimmedHeaders = headerInfo.headers.map(h => String(h || "").trim());
+    const dataRowCount = classLastRow - headerInfo.rowIndex;
 
-  for (let r = 0; r < classData.length; r++) {
-    if (String(classData[r][idColIdx]).trim() === String(formData.studentId).trim()) {
-      targetClassRow = r + 3; // 第 3 列起為學生資料
-      break;
-    }
-  }
+    if (dataRowCount > 0) {
+      const classData = classSheet.getRange(headerInfo.rowIndex + 1, 1, dataRowCount, classLastCol).getValues();
+      let targetClassRow = -1;
+      const idColIdx = trimmedHeaders.indexOf("學號");
 
-  if (targetClassRow !== -1) {
-    // 更新時間欄位
-    const timeColIdx = classHeaders.indexOf("時間") + 1;
-    if (timeColIdx > 0) classSheet.getRange(targetClassRow, timeColIdx).setValue(nowStr);
+      if (idColIdx !== -1) {
+        for (let r = 0; r < classData.length; r++) {
+          if (String(classData[r][idColIdx]).trim() === String(formData.studentId).trim()) {
+            targetClassRow = r + headerInfo.rowIndex + 1;
+            break;
+          }
+        }
+      }
 
-    // 更新各題目欄位
-    for (let qTitle in formData.answers) {
-      const colIdx = classHeaders.indexOf(qTitle) + 1;
-      if (colIdx > 0) {
-        classSheet.getRange(targetClassRow, colIdx).setValue(formData.answers[qTitle]);
+      if (targetClassRow !== -1) {
+        const timeColIdx = findTimeColIndex_(trimmedHeaders) + 1;
+        if (timeColIdx > 0) classSheet.getRange(targetClassRow, timeColIdx).setValue(nowStr);
+
+        for (let qTitle in formData.answers) {
+          const colIdx = trimmedHeaders.indexOf(String(qTitle).trim()) + 1;
+          if (colIdx > 0) {
+            classSheet.getRange(targetClassRow, colIdx).setValue(formData.answers[qTitle]);
+          }
+        }
+
+        if (formData.totalAmount !== undefined) {
+          for (let c = 0; c < trimmedHeaders.length; c++) {
+            const h = trimmedHeaders[c];
+            if (h && (totalTitleSet.has(h) || isTotalCol({ title: h }))) {
+              classSheet.getRange(targetClassRow, c + 1).setValue(formData.totalAmount);
+            }
+          }
+        }
       }
     }
   }
