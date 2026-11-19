@@ -277,7 +277,7 @@ function findClassSheet_(ss, className) {
   return null;
 }
 
-// 偵測班級分頁的表頭列位置（優先檢查第 2 列，兼容第 1 列或第 3 列）
+// 偵測班級分頁的表頭列位置（僅比對文字儲存格，避免日期物件轉字串「台北標準時間」誤判）
 function detectClassHeaderRow_(classSheet, lastRow, lastCol) {
   const maxCheckRow = Math.min(3, lastRow);
   const candidates = [];
@@ -285,18 +285,30 @@ function detectClassHeaderRow_(classSheet, lastRow, lastCol) {
   candidates.push(1);
   if (maxCheckRow >= 3) candidates.push(3);
 
-  const headerKeywords = ["時間", "學號", "姓名", "座號"];
+  const headerKeywords = ["班級", "座號", "學號", "姓名", "時間", "報名時間", "填報時間", "填寫時間"];
+  let bestRow = null;
+  let bestScore = 0;
+
   for (let i = 0; i < candidates.length; i++) {
     const r = candidates[i];
     const rowValues = classSheet.getRange(r, 1, 1, lastCol).getValues()[0];
-    const matched = rowValues.some(cell => {
-      const text = String(cell || "").trim();
-      return headerKeywords.indexOf(text) !== -1 || text.indexOf("時間") !== -1;
-    });
-    if (matched) {
-      return { rowIndex: r, headers: rowValues };
+    let score = 0;
+    for (let c = 0; c < rowValues.length; c++) {
+      const cell = rowValues[c];
+      if (typeof cell !== "string") continue; // 排除 Date 與數字儲存格
+      const text = cell.trim();
+      if (!text) continue;
+      if (headerKeywords.indexOf(text) !== -1 || (text.length <= 10 && text.indexOf("時間") !== -1)) {
+        score++;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = { rowIndex: r, headers: rowValues };
     }
   }
+
+  if (bestRow) return bestRow;
 
   const fallbackRow = lastRow >= 2 ? 2 : 1;
   return {
