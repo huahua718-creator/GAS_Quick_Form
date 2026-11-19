@@ -941,6 +941,78 @@ function getClassListForReceipt() {
   return classList;
 }
 
+// 從儲存格內容提取金額（支援純數字與「項目(金額)」格式）
+function extractAmountValue_(val) {
+  if (val === "" || val === null || val === undefined) return 0;
+  if (typeof val === "number") return isNaN(val) ? 0 : val;
+  const str = String(val).trim();
+  if (!str) return 0;
+  const num = Number(str);
+  if (!isNaN(num)) return num;
+  return parseNumber(str);
+}
+
+// 計算單筆報名紀錄的應繳金額（優先讀總計欄，其次依題型加總金額/折扣，最後依費用關鍵字欄位擷取）
+function calculateReceiptAmount_(row, headers, types) {
+  let totalColIdx = -1;
+  let hasTypedAmountCol = false;
+
+  for (let i = 5; i < headers.length; i++) {
+    const qTitle = String(headers[i] || "").trim();
+    const qType = String((types && types[i]) || "").trim();
+    if (totalColIdx === -1 && isTotalCol({ title: qTitle, type: qType })) {
+      totalColIdx = i;
+    }
+    if (qType.indexOf("金額") !== -1) {
+      hasTypedAmountCol = true;
+    }
+  }
+
+  if (totalColIdx !== -1) {
+    const rawTotal = row[totalColIdx];
+    if (rawTotal !== "" && rawTotal !== null && rawTotal !== undefined && !isNaN(Number(rawTotal))) {
+      return Number(rawTotal);
+    }
+  }
+
+  if (hasTypedAmountCol) {
+    let totalAmount = 0;
+    for (let i = 5; i < headers.length; i++) {
+      const qType = String((types && types[i]) || "").trim();
+      const cellVal = row[i];
+
+      if (qType.indexOf("單選(金額)") !== -1 || qType.indexOf("單選:金額") !== -1) {
+        let basePrice = extractAmountValue_(cellVal);
+        if (i + 1 < headers.length) {
+          const nextType = String((types && types[i + 1]) || "").trim();
+          if (nextType.indexOf("單選(折扣)") !== -1 || nextType.indexOf("單選:折扣") !== -1) {
+            basePrice = basePrice * parseDiscount(row[i + 1]);
+          }
+        }
+        totalAmount += basePrice;
+      } else if (qType.indexOf("多選(金額)") !== -1 || qType.indexOf("多選:金額") !== -1) {
+        String(cellVal || "").split(",").forEach(item => {
+          totalAmount += extractAmountValue_(item);
+        });
+      }
+    }
+    return totalAmount;
+  }
+
+  // 備援：依常見費用/金額關鍵字搜尋欄位並支援「項目(金額)」解析
+  const fallbackKeywords = ["總計", "金額", "費用", "報名費", "小計", "費"];
+  for (let k = 0; k < fallbackKeywords.length; k++) {
+    const kw = fallbackKeywords[k];
+    for (let i = 0; i < headers.length; i++) {
+      if (String(headers[i] || "").indexOf(kw) !== -1) {
+        return extractAmountValue_(row[i]);
+      }
+    }
+  }
+
+  return 0;
+}
+
 // 4. 收據資料讀取邏輯 (直接讀取「表單回復」並按班級、座號排序)
 function getReceiptDataAll(selectedClass, customItemTitle) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -951,18 +1023,9 @@ function getReceiptDataAll(selectedClass, customItemTitle) {
   }
 
   const lastCol = respSheet.getLastColumn();
+  const types = respSheet.getRange(2, 1, 1, lastCol).getValues()[0];
   const headers = respSheet.getRange(4, 1, 1, lastCol).getValues()[0];
   const rawData = respSheet.getRange(5, 1, respSheet.getLastRow() - 4, lastCol).getValues();
-
-  // 自動尋找「金額」、「總計」、「費用」欄位
-  let amountColIdx = -1;
-  for (let i = 0; i < headers.length; i++) {
-    const h = String(headers[i] || "");
-    if (h.includes("金額") || h.includes("總計") || h.includes("費用") || h.includes("小計")) {
-      amountColIdx = i;
-      break;
-    }
-  }
 
   let receipts = [];
 
@@ -972,12 +1035,8 @@ function getReceiptDataAll(selectedClass, customItemTitle) {
     const studentId = String(row[2]).trim();
     const name = String(row[3]).trim();
     const time = row[4];
-    
-    // 金額提取
-    let amount = 0;
-    if (amountColIdx !== -1) {
-      amount = Number(row[amountColIdx]) || 0;
-    }
+
+    const amount = calculateReceiptAmount_(row, headers, types);
 
     if (className && name && time) {
       // 依選取班級過濾
