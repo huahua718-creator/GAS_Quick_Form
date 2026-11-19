@@ -952,8 +952,17 @@ function extractAmountValue_(val) {
   return parseNumber(str);
 }
 
-// 計算單筆報名紀錄的應繳金額（優先讀總計欄，其次依題型加總金額/折扣，最後依費用關鍵字欄位擷取）
-function calculateReceiptAmount_(row, headers, types) {
+// 從「項目(金額)」擷取價格前的名稱，若無則使用欄位標題
+function parseReceiptItemName_(val, fallbackTitle) {
+  const str = String(val === null || val === undefined ? "" : val).trim();
+  if (!str) return fallbackTitle || "報名項目";
+  if (!isNaN(Number(str))) return fallbackTitle || "報名項目";
+  const cleaned = str.replace(/\(\s*\d+\s*\)/g, "").trim();
+  return cleaned || fallbackTitle || "報名項目";
+}
+
+// 計算單筆報名紀錄的應繳金額與細項清單
+function calculateReceiptDetail_(row, headers, types) {
   let totalColIdx = -1;
   let hasTypedAmountCol = false;
 
@@ -968,35 +977,69 @@ function calculateReceiptAmount_(row, headers, types) {
     }
   }
 
-  if (totalColIdx !== -1) {
-    const rawTotal = row[totalColIdx];
-    if (rawTotal !== "" && rawTotal !== null && rawTotal !== undefined && !isNaN(Number(rawTotal))) {
-      return Number(rawTotal);
-    }
-  }
+  const items = [];
 
   if (hasTypedAmountCol) {
     let totalAmount = 0;
     for (let i = 5; i < headers.length; i++) {
+      const qTitle = String(headers[i] || "").trim();
       const qType = String((types && types[i]) || "").trim();
       const cellVal = row[i];
 
       if (qType.indexOf("單選(金額)") !== -1 || qType.indexOf("單選:金額") !== -1) {
-        let basePrice = extractAmountValue_(cellVal);
+        const basePrice = extractAmountValue_(cellVal);
+        let finalPrice = basePrice;
+        let itemName = parseReceiptItemName_(cellVal, qTitle);
+
         if (i + 1 < headers.length) {
           const nextType = String((types && types[i + 1]) || "").trim();
           if (nextType.indexOf("單選(折扣)") !== -1 || nextType.indexOf("單選:折扣") !== -1) {
-            basePrice = basePrice * parseDiscount(row[i + 1]);
+            const discountRaw = row[i + 1];
+            const discountRate = parseDiscount(discountRaw);
+            finalPrice = basePrice * discountRate;
+            const discountLabel = String(discountRaw || "").replace(/\(\s*\d+\s*%\s*\)/g, "").trim();
+            if (discountLabel && discountRate !== 1) {
+              itemName = `${itemName}（${discountLabel}）`;
+            }
           }
         }
-        totalAmount += basePrice;
+
+        if (finalPrice > 0) {
+          items.push({ name: itemName, amount: finalPrice });
+          totalAmount += finalPrice;
+        }
       } else if (qType.indexOf("多選(金額)") !== -1 || qType.indexOf("多選:金額") !== -1) {
-        String(cellVal || "").split(",").forEach(item => {
-          totalAmount += extractAmountValue_(item);
+        String(cellVal || "").split(",").forEach(part => {
+          const price = extractAmountValue_(part);
+          if (price > 0) {
+            items.push({ name: parseReceiptItemName_(part, qTitle), amount: price });
+            totalAmount += price;
+          }
         });
       }
     }
-    return totalAmount;
+
+    if (totalColIdx !== -1) {
+      const rawTotal = row[totalColIdx];
+      if (rawTotal !== "" && rawTotal !== null && rawTotal !== undefined && !isNaN(Number(rawTotal))) {
+        const storedTotal = Number(rawTotal);
+        if (items.length === 0 && storedTotal > 0) {
+          items.push({ name: String(headers[totalColIdx] || "報名費").trim(), amount: storedTotal });
+        }
+        return { amount: storedTotal, items: items };
+      }
+    }
+
+    return { amount: totalAmount, items: items };
+  }
+
+  if (totalColIdx !== -1) {
+    const rawTotal = row[totalColIdx];
+    const totalVal = extractAmountValue_(rawTotal);
+    if (totalVal > 0) {
+      items.push({ name: parseReceiptItemName_(rawTotal, String(headers[totalColIdx] || "報名費").trim()), amount: totalVal });
+    }
+    return { amount: totalVal, items: items };
   }
 
   // 備援：依常見費用/金額關鍵字搜尋欄位並支援「項目(金額)」解析
@@ -1004,18 +1047,79 @@ function calculateReceiptAmount_(row, headers, types) {
   for (let k = 0; k < fallbackKeywords.length; k++) {
     const kw = fallbackKeywords[k];
     for (let i = 0; i < headers.length; i++) {
-      if (String(headers[i] || "").indexOf(kw) !== -1) {
-        return extractAmountValue_(row[i]);
+      const h = String(headers[i] || "").trim();
+      if (h.indexOf(kw) !== -1) {
+        const val = extractAmountValue_(row[i]);
+        if (val > 0) {
+          items.push({ name: parseReceiptItemName_(row[i], h), amount: val });
+        }
+        return { amount: val, items: items };
       }
     }
   }
 
-  return 0;
+  return { amount: 0, items: items };
 }
 
-// 4. 收據資料讀取邏輯 (直接讀取「表單回復」並按班級、座號排序)
-function getReceiptDataAll(selectedClass, customItemTitle) {
+// 取得已儲存的單位印章（從 DocumentProperties 重組分段資料）
+function getReceiptStamp_() {
+  const props = PropertiesService.getDocumentProperties();
+  const count = parseInt(props.getProperty("RECEIPT_STAMP_CHUNKS") || "0", 10);
+  if (!count || count <= 0) return "";
+  let dataUrl = "";
+  for (let i = 0; i < count; i++) {
+    const chunk = props.getProperty("RECEIPT_STAMP_" + i);
+    if (chunk === null) return "";
+    dataUrl += chunk;
+  }
+  return dataUrl;
+}
+
+// 清除已儲存的單位印章
+function clearReceiptStamp() {
+  const props = PropertiesService.getDocumentProperties();
+  const count = parseInt(props.getProperty("RECEIPT_STAMP_CHUNKS") || "0", 10);
+  for (let i = 0; i < count; i++) {
+    props.deleteProperty("RECEIPT_STAMP_" + i);
+  }
+  props.deleteProperty("RECEIPT_STAMP_CHUNKS");
+  return { success: true };
+}
+
+// 儲存單位印章（依 8000 字元分段寫入 DocumentProperties，避開單一屬性 9KB 上限）
+function saveReceiptStamp(dataUrl) {
+  if (typeof dataUrl !== "string" || dataUrl.indexOf("data:image/") !== 0) {
+    return { success: false, message: "請上傳有效的圖片格式（PNG / JPG）！" };
+  }
+  if (dataUrl.length > 250000) {
+    return { success: false, message: "印章圖片檔案過大，請選擇較小的圖片！" };
+  }
+
+  clearReceiptStamp();
+  const props = PropertiesService.getDocumentProperties();
+  const chunkSize = 8000;
+  const count = Math.ceil(dataUrl.length / chunkSize);
+  for (let i = 0; i < count; i++) {
+    props.setProperty("RECEIPT_STAMP_" + i, dataUrl.slice(i * chunkSize, (i + 1) * chunkSize));
+  }
+  props.setProperty("RECEIPT_STAMP_CHUNKS", String(count));
+  return { success: true };
+}
+
+// 收據視窗初始化：一次取得班級清單、試算表檔名與已儲存之印章
+function getReceiptInitData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return {
+    classes: getClassListForReceipt(),
+    docName: ss.getName().trim(),
+    stampDataUrl: getReceiptStamp_()
+  };
+}
+
+// 4. 收據資料讀取邏輯 (直接讀取「表單回復」、依學號去重保留最新一筆，並按班級、座號排序)
+function getReceiptDataAll(selectedClass) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const docName = ss.getName().trim();
   const respSheet = ss.getSheetByName("表單回復");
 
   if (!respSheet || respSheet.getLastRow() < 5) {
@@ -1027,31 +1131,42 @@ function getReceiptDataAll(selectedClass, customItemTitle) {
   const headers = respSheet.getRange(4, 1, 1, lastCol).getValues()[0];
   const rawData = respSheet.getRange(5, 1, respSheet.getLastRow() - 4, lastCol).getValues();
 
-  let receipts = [];
+  // 依學號去重，保留時間最新的一筆（若時間無法比較則以後列為準）
+  const dedupMap = new Map();
 
-  rawData.forEach(row => {
+  rawData.forEach((row, idx) => {
     const className = String(row[0]).trim();
     const seatNo = parseInt(row[1], 10) || 0;
     const studentId = String(row[2]).trim();
     const name = String(row[3]).trim();
     const time = row[4];
 
-    const amount = calculateReceiptAmount_(row, headers, types);
+    if (!className || !name || !time) return;
+    if (selectedClass !== "ALL" && selectedClass !== className) return;
 
-    if (className && name && time) {
-      // 依選取班級過濾
-      if (selectedClass === "ALL" || selectedClass === className) {
-        receipts.push({
+    const ts = (time instanceof Date) ? time.getTime() : new Date(String(time)).getTime();
+    const validTs = isNaN(ts) ? 0 : ts;
+    const key = studentId || `${className}__${seatNo}__${name}`;
+    const prev = dedupMap.get(key);
+
+    if (!prev || validTs > prev.ts || (validTs === prev.ts && idx > prev.idx)) {
+      const detail = calculateReceiptDetail_(row, headers, types);
+      dedupMap.set(key, {
+        ts: validTs,
+        idx: idx,
+        receipt: {
           className: className,
           seatNo: seatNo,
           studentId: studentId,
           name: name,
-          itemTitle: customItemTitle || "活動報名費用",
-          amount: amount
-        });
-      }
+          items: detail.items,
+          amount: detail.amount
+        }
+      });
     }
   });
+
+  const receipts = Array.from(dedupMap.values()).map(entry => entry.receipt);
 
   if (receipts.length === 0) {
     return { error: "找不到符合條件的報名收據資料！" };
@@ -1065,5 +1180,5 @@ function getReceiptDataAll(selectedClass, customItemTitle) {
     return a.seatNo - b.seatNo;
   });
 
-  return { receipts: receipts };
+  return { docName: docName, receipts: receipts };
 }

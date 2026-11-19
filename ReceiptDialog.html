@@ -9,7 +9,7 @@
       color: #000;
       background-color: #f4f6f9;
     }
-    
+
     /* 操作控制區（列印時自動隱藏） */
     .no-print {
       background: #ffffff;
@@ -17,18 +17,24 @@
       border-radius: 8px;
       margin-bottom: 20px;
       box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .control-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
     }
     .form-group {
-      margin-bottom: 10px;
-      display: inline-block;
-      margin-right: 15px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }
     label {
       font-weight: bold;
-      font-family: system-ui, -apple-system, sans-serif;
-      margin-right: 5px;
+      font-size: 14px;
     }
-    select, input {
+    select, input[type="range"] {
       padding: 6px 10px;
       font-size: 14px;
       border: 1px solid #ccc;
@@ -42,35 +48,111 @@
       font-size: 14px;
       border-radius: 4px;
       cursor: pointer;
-      font-family: system-ui, -apple-system, sans-serif;
     }
     .btn:hover { background-color: #1557b0; }
     .btn-print { background-color: #34a853; }
     .btn-print:hover { background-color: #2d8e47; }
+    .btn-outline {
+      background-color: #fff;
+      color: #333;
+      border: 1px solid #bbb;
+      padding: 5px 12px;
+      font-size: 13px;
+    }
+    .btn-outline:hover { background-color: #f1f3f4; }
+    .btn-danger-outline {
+      background-color: #fff;
+      color: #c5221f;
+      border: 1px solid #e0a0a0;
+      padding: 5px 12px;
+      font-size: 13px;
+    }
+    .btn-danger-outline:hover { background-color: #fce8e6; }
+
+    /* 印章引導與預覽列 */
+    .stamp-panel {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .stamp-panel-guide {
+      background: #e8f0fe;
+      border: 1px dashed #1a73e8;
+      color: #174ea6;
+    }
+    .stamp-panel-ready {
+      background: #f8f9fa;
+      border: 1px solid #dadce0;
+      color: #333;
+    }
+    .stamp-preview-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .stamp-thumb {
+      width: 40px;
+      height: 40px;
+      object-fit: contain;
+      border: 1px solid #ddd;
+      background: #fff;
+      border-radius: 4px;
+      padding: 2px;
+    }
+    .stamp-status {
+      font-size: 12px;
+      color: #5f6368;
+    }
 
     /* 單張收據列印樣式 */
     .receipt-card {
       width: 85%;
       margin: 0 auto 25px auto;
-      padding: 20px 30px;
+      padding: 22px 32px;
       border: 1px solid #000;
       box-sizing: border-box;
       background: #fff;
       page-break-inside: avoid; /* 避免單張收據跨頁裁切 */
     }
-    
+
     .receipt-title {
       text-align: center;
-      font-size: 24px;
+      font-size: 21px;
       font-weight: bold;
-      letter-spacing: 10px;
-      margin-bottom: 25px;
+      letter-spacing: 2px;
+      margin-bottom: 18px;
+      line-height: 1.4;
     }
 
     .receipt-line {
       font-size: 18px;
-      line-height: 2.2;
-      margin-bottom: 8px;
+      line-height: 2.0;
+      margin-bottom: 6px;
+    }
+
+    .receipt-items {
+      margin: 8px 0 10px 0;
+      padding: 8px 14px;
+      border-top: 1px dashed #999;
+      border-bottom: 1px dashed #999;
+      font-size: 16px;
+    }
+    .receipt-items-label {
+      font-weight: bold;
+      margin-bottom: 4px;
+    }
+    .receipt-item-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      line-height: 1.7;
+      padding-left: 10px;
     }
 
     .underline {
@@ -82,10 +164,21 @@
     }
 
     .stamp-box {
-      margin-top: 20px;
+      margin-top: 16px;
       text-align: right;
-      font-size: 14px;
-      color: #333;
+      font-size: 15px;
+      color: #222;
+      min-height: 40px;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 8px;
+    }
+    .stamp-img {
+      height: auto;
+      max-height: 140px;
+      object-fit: contain;
+      mix-blend-mode: multiply; /* 自動淡化白底 scan 圖背景 */
     }
 
     /* 列印專用樣式 */
@@ -104,20 +197,24 @@
 
   <!-- 控制面板 (列印時自動隱藏) -->
   <div class="no-print">
-    <div class="form-group">
-      <label for="classSelect">列印對象：</label>
-      <select id="classSelect"><option value="">載入中...</option></select>
+    <div class="control-row">
+      <div class="form-group">
+        <label for="classSelect">列印對象：</label>
+        <select id="classSelect"><option value="">載入中...</option></select>
+      </div>
+
+      <button class="btn" onclick="generateReceipts()">產生收據</button>
+      <button class="btn btn-print" onclick="window.print()" id="btnPrint" style="display:none;">🖨️ 列印 / 存為 PDF</button>
     </div>
 
-    <div class="form-group">
-      <label for="itemTitle">收費項目名稱：</label>
-      <input type="text" id="itemTitle" placeholder="例如：美術競賽裱框費用" value="活動報名費用" style="width: 200px;">
+    <!-- 單位印章上傳引導與設定區 -->
+    <input type="file" id="stampInput" accept="image/*" style="display:none;" onchange="handleStampUpload(event)">
+    <div id="stampPanel" class="stamp-panel stamp-panel-guide">
+      <div id="stampGuideText">⏳ 正在檢查單位印章設定...</div>
+      <div id="stampActions"></div>
     </div>
 
-    <button class="btn" onclick="generateReceipts()">產生收據</button>
-    <button class="btn btn-print" onclick="window.print()" id="btnPrint" style="display:none;">🖨️ 列印 / 存為 PDF</button>
-    
-    <div style="margin-top: 8px; font-size: 12px; color: #666; font-family: system-ui;">
+    <div style="margin-top: 8px; font-size: 12px; color: #666;">
       💡 提示：點擊「列印」後，可在印表機設定中調整「每張紙的版面數量」（如一頁放 2 張或 4 張收據）。
     </div>
   </div>
@@ -126,24 +223,133 @@
   <div id="receiptContainer"></div>
 
   <script>
+    let currentDocName = "";
+    let currentStampUrl = "";
+    let currentStampSize = 95;
+    let lastRenderedData = null;
+
     window.onload = function() {
-      google.script.run.withSuccessHandler(function(classes) {
+      google.script.run.withSuccessHandler(function(init) {
         const select = document.getElementById('classSelect');
         select.innerHTML = '';
-        classes.forEach(c => {
+        (init.classes || []).forEach(c => {
           const opt = document.createElement('option');
           opt.value = c;
-          opt.textContent = c === "ALL" ? "🌟 全校所有班級 (批次列印)" : c + " 班";
+          opt.textContent = c === "ALL" ? "🌟 全校所有班級 (批次列印)" : (c.endsWith("班") ? c : c + " 班");
           select.appendChild(opt);
         });
-      }).getClassListForReceipt();
+        currentDocName = init.docName || "";
+        currentStampUrl = init.stampDataUrl || "";
+        renderStampPanel();
+      }).getReceiptInitData();
     };
+
+    function renderStampPanel(statusMsg) {
+      const panel = document.getElementById('stampPanel');
+      const textEl = document.getElementById('stampGuideText');
+      const actionsEl = document.getElementById('stampActions');
+
+      if (!currentStampUrl) {
+        panel.className = 'stamp-panel stamp-panel-guide';
+        textEl.innerHTML = '📌 <b>尚未上傳單位印章（選填）</b>：建議先上傳印章圖片（PNG 透明圖或白底圖皆可），系統會記住並直接貼在收據右下角；若不需電子章也可直接產生收據。';
+        actionsEl.innerHTML = '<button class="btn" onclick="triggerStampUpload()">📤 上傳單位印章</button>';
+      } else {
+        panel.className = 'stamp-panel stamp-panel-ready';
+        textEl.innerHTML = `
+          <div class="stamp-preview-wrap">
+            <img src="${currentStampUrl}" class="stamp-thumb" alt="單位印章預覽">
+            <div>
+              <div><b>✅ 已套用單位印章</b> <span class="stamp-status">${escapeHtml(statusMsg || '（已儲存於此試算表，下次免重傳）')}</span></div>
+              <div style="margin-top:4px; display:flex; align-items:center; gap:6px;">
+                <span>印章大小：</span>
+                <input type="range" min="65" max="140" value="${currentStampSize}" oninput="updateStampSize(this.value)">
+                <span id="stampSizeLabel">${currentStampSize}px</span>
+              </div>
+            </div>
+          </div>
+        `;
+        actionsEl.innerHTML = `
+          <button class="btn btn-outline" onclick="triggerStampUpload()">🔄 更換印章</button>
+          <button class="btn btn-danger-outline" onclick="removeStamp()">🗑️ 移除印章</button>
+        `;
+      }
+    }
+
+    function triggerStampUpload() {
+      const input = document.getElementById('stampInput');
+      input.value = '';
+      input.click();
+    }
+
+    function updateStampSize(val) {
+      currentStampSize = parseInt(val, 10) || 95;
+      const label = document.getElementById('stampSizeLabel');
+      if (label) label.innerText = currentStampSize + 'px';
+      document.querySelectorAll('.stamp-img').forEach(img => {
+        img.style.width = currentStampSize + 'px';
+      });
+    }
+
+    function handleStampUpload(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const img = new Image();
+        img.onload = function() {
+          const maxDim = 280;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w >= h) {
+              h = Math.round(h * maxDim / w);
+              w = maxDim;
+            } else {
+              w = Math.round(w * maxDim / h);
+              h = maxDim;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+
+          let dataUrl = canvas.toDataURL('image/png');
+          if (dataUrl.length > 150000) {
+            dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          }
+
+          currentStampUrl = dataUrl;
+          renderStampPanel('⏳ 正在儲存印章...');
+          if (lastRenderedData) renderReceiptsHtml(lastRenderedData);
+
+          google.script.run.withSuccessHandler(function(res) {
+            if (res && res.success) {
+              renderStampPanel('（已儲存於此試算表，下次免重傳）');
+            } else {
+              alert('❌ 印章儲存失敗：' + (res ? res.message : '未知錯誤'));
+            }
+          }).saveReceiptStamp(dataUrl);
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function removeStamp() {
+      currentStampUrl = '';
+      renderStampPanel();
+      if (lastRenderedData) renderReceiptsHtml(lastRenderedData);
+      google.script.run.clearReceiptStamp();
+    }
 
     function generateReceipts() {
       const className = document.getElementById('classSelect').value;
-      const itemTitle = document.getElementById('itemTitle').value.trim() || "活動報名費用";
       const container = document.getElementById('receiptContainer');
-      
+
       if (!className) {
         alert("請選擇列印對象！");
         return;
@@ -153,40 +359,75 @@
 
       google.script.run.withSuccessHandler(function(res) {
         if (res.error) {
-          container.innerHTML = '<div style="color:red; text-align:center; font-family:system-ui; padding:20px;">❌ ' + res.error + '</div>';
+          lastRenderedData = null;
+          container.innerHTML = '<div style="color:red; text-align:center; font-family:system-ui; padding:20px;">❌ ' + escapeHtml(res.error) + '</div>';
           document.getElementById('btnPrint').style.display = 'none';
           return;
         }
 
-        let html = '';
-        res.receipts.forEach(r => {
-          html += `
-            <div class="receipt-card">
-              <div class="receipt-title">收 據</div>
-              
-              <div class="receipt-line">
-                茲收到 <span class="underline" style="min-width: 90px;">${r.className} 班</span> 
-                <span class="underline" style="min-width: 110px;">${r.name}</span>
-              </div>
-              
-              <div class="receipt-line">
-                ${r.itemTitle}
-              </div>
-              
-              <div class="receipt-line">
-                新臺幣 <span class="underline" style="min-width: 100px;">${r.amount.toLocaleString()}</span> 元整無訛。
-              </div>
-
-              <div class="stamp-box">
-                （承辦單位蓋章處）
-              </div>
-            </div>
-          `;
-        });
-
-        container.innerHTML = html;
+        lastRenderedData = res;
+        renderReceiptsHtml(res);
         document.getElementById('btnPrint').style.display = 'inline-block';
-      }).getReceiptDataAll(className, itemTitle);
+      }).getReceiptDataAll(className);
+    }
+
+    function renderReceiptsHtml(res) {
+      const container = document.getElementById('receiptContainer');
+      const titleText = (res.docName || currentDocName || "活動") + " 收據";
+      let html = '';
+
+      res.receipts.forEach(r => {
+        const classLabel = r.className.endsWith("班") ? r.className : (r.className + " 班");
+        let itemsHtml = '';
+        if (r.items && r.items.length > 0) {
+          itemsHtml = '<div class="receipt-items"><div class="receipt-items-label">收費細項：</div>';
+          r.items.forEach(item => {
+            itemsHtml += `
+              <div class="receipt-item-row">
+                <span>• ${escapeHtml(item.name)}</span>
+                <span>${Number(item.amount || 0).toLocaleString()} 元</span>
+              </div>
+            `;
+          });
+          itemsHtml += '</div>';
+        }
+
+        const stampHtml = currentStampUrl
+          ? `承辦單位：<img src="${currentStampUrl}" class="stamp-img" style="width:${currentStampSize}px;" alt="單位印章">`
+          : `（承辦單位蓋章處）`;
+
+        html += `
+          <div class="receipt-card">
+            <div class="receipt-title">${escapeHtml(titleText)}</div>
+
+            <div class="receipt-line">
+              茲收到 <span class="underline" style="min-width: 90px;">${escapeHtml(classLabel)}</span>
+              <span class="underline" style="min-width: 110px;">${escapeHtml(r.name)}</span>
+            </div>
+
+            ${itemsHtml}
+
+            <div class="receipt-line">
+              合計新臺幣 <span class="underline" style="min-width: 100px;">${Number(r.amount || 0).toLocaleString()}</span> 元整無訛。
+            </div>
+
+            <div class="stamp-box">
+              ${stampHtml}
+            </div>
+          </div>
+        `;
+      });
+
+      container.innerHTML = html;
+    }
+
+    function escapeHtml(str) {
+      return String(str === null || str === undefined ? '' : str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
   </script>
 </body>
