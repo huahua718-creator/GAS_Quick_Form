@@ -21,6 +21,7 @@ function onOpen() {
     .addItem('4. 進入 Apps Script 部署網頁與複製連結(說明)', 'showStep4Instruction')
     .addSeparator()
     .addItem('5. 匯出班級試算表並寄信給導師', 'exportAndEmailSheets')
+    .addItem('🔄 手動同步更新已寄出的導師試算表', 'syncAllExportedSheets')
     .addItem('6. 🧾 班級收據批次列印', 'openReceiptDialog')
     .addToUi();
 }
@@ -252,6 +253,10 @@ function initClassSheets() {
     sheet.getRange(totalRowIndex, 1, 1, classHeaders.length).setBackground("#f8f9fa").setFontWeight("bold");
   }
 
+  try {
+    syncAllExportedClassSheets_(false);
+  } catch (e) {}
+
   SpreadsheetApp.getUi().alert("✅ 班級分頁已建立完成！\n已更新 A1 班級標題，並於底部自動加入金額加總公式。");
 }
 
@@ -324,64 +329,138 @@ function findTimeColIndex_(trimmedHeaders) {
   return trimmedHeaders.findIndex(h => h.indexOf("時間") !== -1);
 }
 
-// 檢查班級分頁是否有學生報名／填寫資料（排除合計列）
-function hasClassSubmission_(classSheet, headerInfo, rawProfileHeaders) {
-  const lastRow = classSheet.getLastRow();
-  const lastCol = classSheet.getLastColumn();
-  if (lastRow <= headerInfo.rowIndex || lastCol === 0) return false;
-
-  const trimmedHeaders = headerInfo.headers.map(h => String(h || "").trim());
-  const timeColIdx = findTimeColIndex_(trimmedHeaders);
-
-  const checkColIndices = [];
-  if (timeColIdx !== -1) {
-    // 檢查「時間」欄及其後的題目欄位（若任一有填寫即視為有報名資料）
-    for (let c = timeColIdx; c < trimmedHeaders.length; c++) {
-      if (trimmedHeaders[c] !== "" || c === timeColIdx) {
-        checkColIndices.push(c);
-      }
-    }
-  } else {
-    // 若找不到「時間」欄，則檢查基本資料欄位以外的所有欄位
-    const baseSet = new Set(["班級", "座號", "學號", "姓名", "生日", "性別", "身分證字號"]);
-    (rawProfileHeaders || []).forEach(h => {
-      const t = String(h || "").trim();
-      if (t) baseSet.add(t);
-    });
-    for (let c = 0; c < trimmedHeaders.length; c++) {
-      if (trimmedHeaders[c] && !baseSet.has(trimmedHeaders[c])) {
-        checkColIndices.push(c);
-      }
-    }
+// 讀取「班級分頁名稱 -> 已匯出試算表 ID」對照表
+function getExportedSheetsMap_() {
+  const raw = PropertiesService.getDocumentProperties().getProperty("EXPORTED_CLASS_SHEETS_MAP");
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    return {};
   }
-
-  if (checkColIndices.length === 0) return false;
-
-  const dataRowCount = lastRow - headerInfo.rowIndex;
-  const rows = classSheet.getRange(headerInfo.rowIndex + 1, 1, dataRowCount, lastCol).getValues();
-
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r];
-    // 排除底部的「合計」列，避免 =SUM 公式結果誤判
-    const leadCells = row.slice(0, Math.min(3, row.length)).map(v => String(v || "").trim());
-    if (leadCells.indexOf("合計") !== -1) continue;
-
-    for (let k = 0; k < checkColIndices.length; k++) {
-      const val = row[checkColIndices[k]];
-      if (val instanceof Date) return true;
-      if (String(val === null || val === undefined ? "" : val).trim() !== "") {
-        return true;
-      }
-    }
-  }
-
-  return false;
 }
 
-// 批次匯出各班獨立試算表並 Email 寄給導師 (適應新版第 2 列表頭結構，並相容班級名稱與表頭位置差異)
+// 儲存「班級分頁名稱 -> 已匯出試算表 ID」對照表
+function saveExportedSheetsMap_(map) {
+  PropertiesService.getDocumentProperties().setProperty("EXPORTED_CLASS_SHEETS_MAP", JSON.stringify(map || {}));
+}
+
+// 將來源班級分頁的最新內容同步至導師獨立試算表（維度相符時原地更新，否則整頁替換以保留相同網址）
+function syncClassSheetContent_(sourceSheet, targetSs) {
+  const sheetName = sourceSheet.getName();
+  const lastRow = sourceSheet.getLastRow();
+  const lastCol = sourceSheet.getLastColumn();
+  const destSheet = findClassSheet_(targetSs, sheetName) || targetSs.getSheets()[0];
+
+  if (destSheet && lastRow > 0 && lastCol > 0 &&
+      destSheet.getLastRow() === lastRow && destSheet.getLastColumn() === lastCol) {
+    const srcRange = sourceSheet.getRange(1, 1, lastRow, lastCol);
+    const values = srcRange.getValues();
+    const formulas = srcRange.getFormulas();
+    for (let r = 0; r < values.length; r++) {
+      for (let c = 0; c < values[r].length; c++) {
+        if (formulas[r][c]) {
+          values[r][c] = formulas[r][c];
+        }
+      }
+    }
+    destSheet.getRange(1, 1, lastRow, lastCol).setValues(values);
+    if (destSheet.getName() !== sheetName) {
+      destSheet.setName(sheetName);
+    }
+    return;
+  }
+
+  const copied = sourceSheet.copyTo(targetSs);
+  targetSs.getSheets().forEach(s => {
+    if (s.getSheetId() !== copied.getSheetId()) {
+      targetSs.deleteSheet(s);
+    }
+  });
+  copied.setName(sheetName);
+}
+
+// 依據主表單班級分頁，即時同步更新對應的已匯出導師試算表
+function syncExportedClassSheet_(classSheet) {
+  if (!classSheet) return false;
+  const map = getExportedSheetsMap_();
+  const sheetName = classSheet.getName().trim();
+  const altName = sheetName.endsWith("班") ? sheetName.slice(0, -1).trim() : sheetName + "班";
+  const exportedId = map[sheetName] || map[altName];
+  if (!exportedId) return false;
+
+  try {
+    const targetSs = SpreadsheetApp.openById(exportedId);
+    syncClassSheetContent_(classSheet, targetSs);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 批次同步所有已建立的導師獨立試算表
+function syncAllExportedClassSheets_(showUi) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const map = getExportedSheetsMap_();
+  const entries = Object.keys(map);
+  if (entries.length === 0) {
+    if (showUi) {
+      SpreadsheetApp.getUi().alert("ℹ️ 目前尚未匯出任何導師獨立試算表，請先執行『5. 匯出班級試算表並寄信給導師』。");
+    }
+    return { updated: 0, skipped: 0 };
+  }
+
+  let updated = 0;
+  let skipped = 0;
+  entries.forEach(clsName => {
+    const classSheet = findClassSheet_(ss, clsName);
+    if (!classSheet) {
+      skipped++;
+      return;
+    }
+    try {
+      const targetSs = SpreadsheetApp.openById(map[clsName]);
+      syncClassSheetContent_(classSheet, targetSs);
+      updated++;
+    } catch (e) {
+      skipped++;
+    }
+  });
+
+  if (showUi) {
+    SpreadsheetApp.getUi().alert(`✅ 導師試算表同步完成！\n已更新：${updated} 班${skipped > 0 ? `\n未更新（檔案已刪除或無對應分頁）：${skipped} 班` : ""}`);
+  }
+  return { updated: updated, skipped: skipped };
+}
+
+// 選單入口：手動同步更新已寄出的導師試算表
+function syncAllExportedSheets() {
+  syncAllExportedClassSheets_(true);
+}
+
+// 可安裝的編輯觸發器：承辦人手動修改主表班級分頁時自動同步至導師試算表
+function onMasterSheetEdit(e) {
+  if (!e || !e.range) return;
+  const sheet = e.range.getSheet();
+  const ignoreSheets = ["表單回復", "原始名單", "導師名單", "📜 使用說明"];
+  if (ignoreSheets.indexOf(sheet.getName()) !== -1) return;
+  syncExportedClassSheet_(sheet);
+}
+
+// 確保已安裝主表編輯自動同步觸發器
+function ensureEditSyncTrigger_(ss) {
+  const triggers = ScriptApp.getProjectTriggers();
+  const exists = triggers.some(t => t.getHandlerFunction() === "onMasterSheetEdit");
+  if (!exists) {
+    ScriptApp.newTrigger("onMasterSheetEdit").forSpreadsheet(ss).onEdit().create();
+  }
+}
+
+// 批次匯出各班獨立試算表並 Email 寄給導師（含無人報名班級，且固定檔案與連結以支援動態同步更新）
 function exportAndEmailSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const docName = ss.getName();
+  const docName = ss.getName().trim();
   const teacherSheet = ss.getSheetByName("導師名單");
 
   if (!teacherSheet) {
@@ -397,8 +476,10 @@ function exportAndEmailSheets() {
 
   const ui = SpreadsheetApp.getUi();
   const confirm = ui.alert(
-    '📧 批次匯出與寄信確認',
-    '系統將會檢查各班報名狀況：\n1. 有學生報名：自動建立獨立試算表並寄信給導師。\n2. 尚無學生報名：自動跳過不寄信。\n\n請問是否確定開始執行？',
+    '📧 批次匯出與寄信確認（動態更新模式）',
+    '系統將會為『導師名單』中的所有有效班級建立（或沿用既有）獨立試算表並寄信給導師：\n' +
+    '1. 尚無學生報名的班級也會先建立統計表並寄出連結。\n' +
+    '2. 之後學生送出／修改報名或承辦人編輯名單，會自動同步更新至同一份試算表連結。',
     ui.ButtonSet.YES_NO
   );
 
@@ -410,12 +491,9 @@ function exportAndEmailSheets() {
   let tEmailIdx = teacherHeaders.findIndex(h => h.toLowerCase().indexOf("email") !== -1 || h.indexOf("信箱") !== -1 || h.indexOf("郵件") !== -1);
   if (tEmailIdx === -1) tEmailIdx = 2;
 
-  const rawSheet = ss.getSheetByName("原始名單");
-  const rawProfileHeaders = (rawSheet && rawSheet.getLastRow() >= 1 && rawSheet.getLastColumn() >= 2)
-    ? rawSheet.getRange(1, 2, 1, rawSheet.getLastColumn() - 1).getValues()[0]
-    : [];
-
-  let successCount = 0;
+  const exportedMap = getExportedSheetsMap_();
+  let createdCount = 0;
+  let updatedCount = 0;
   let skipCount = 0;
   let failCount = 0;
   let logs = [];
@@ -450,42 +528,62 @@ function exportAndEmailSheets() {
       continue;
     }
 
-    const hasSubmission = hasClassSubmission_(classSheet, headerInfo, rawProfileHeaders);
-    if (!hasSubmission) {
-      logs.push(`⏭️ 跳過 ${classLabel} (${teacherName})：目前尚無學生完成報名`);
-      skipCount++;
-      continue;
-    }
-
     try {
+      const actualSheetName = classSheet.getName().trim();
       const newFileName = `${docName} - ${classLabel} 報名統計`;
-      const newSs = SpreadsheetApp.create(newFileName);
-      const defaultSheet = newSs.getSheets()[0];
+      let targetSs = null;
+      let isReused = false;
+      const existingId = exportedMap[actualSheetName] || exportedMap[className];
 
-      const copiedSheet = classSheet.copyTo(newSs);
-      if (defaultSheet && defaultSheet.getSheetId() !== copiedSheet.getSheetId()) {
-        newSs.deleteSheet(defaultSheet);
+      if (existingId) {
+        try {
+          targetSs = SpreadsheetApp.openById(existingId);
+          if (targetSs.getName() !== newFileName) {
+            targetSs.setName(newFileName);
+          }
+          syncClassSheetContent_(classSheet, targetSs);
+          isReused = true;
+        } catch (openErr) {
+          targetSs = null;
+        }
       }
-      copiedSheet.setName(classSheet.getName());
 
-      newSs.addViewer(email);
-      const fileUrl = newSs.getUrl();
+      if (!targetSs) {
+        targetSs = SpreadsheetApp.create(newFileName);
+        syncClassSheetContent_(classSheet, targetSs);
+      }
+
+      exportedMap[actualSheetName] = targetSs.getId();
+      targetSs.addViewer(email);
+      const fileUrl = targetSs.getUrl();
 
       const subject = `【報名統計通知】${docName} - ${classLabel} 學生報名結果`;
       const body = `${teacherName} 老師您好：\n\n` +
-                   `這是貴班（${classLabel}）在「${docName}」活動的學生最新報名統計表：\n\n` +
-                   `🔗 統計表連結：\n${fileUrl}\n\n` +
-                   `此信件為系統自動發送，點擊連結即可即時查看學生報名狀況。`;
+                   `這是貴班（${classLabel}）在「${docName}」活動的學生報名統計表：\n\n` +
+                   `🔗 統計表連結（將隨報名狀況動態更新）：\n${fileUrl}\n\n` +
+                   `此信件為系統自動發送，之後若有學生新增或修改報名，開啟同一連結重新整理即可即時查看最新名單。`;
 
       MailApp.sendEmail(email, subject, body);
-      successCount++;
+      if (isReused) {
+        updatedCount++;
+      } else {
+        createdCount++;
+      }
     } catch (e) {
       logs.push(`❌ ${classLabel} (${teacherName}) 處理失敗：${e.message}`);
       failCount++;
     }
   }
 
-  let resultMsg = `✅ 處理完成！\n成功寄出：${successCount} 封\n自動跳過（無人報名/無名單）：${skipCount} 班`;
+  saveExportedSheetsMap_(exportedMap);
+
+  try {
+    ensureEditSyncTrigger_(ss);
+  } catch (triggerErr) {
+    logs.push(`⚠️ 自動同步編輯觸發器建立失敗（請改用選單手動同步）：${triggerErr.message}`);
+  }
+
+  let resultMsg = `✅ 處理完成！\n新建並寄出：${createdCount} 封\n更新並寄出：${updatedCount} 封\n跳過（缺 Email / 無名單）：${skipCount} 班`;
   if (failCount > 0) resultMsg += `\n執行失敗：${failCount} 班`;
   if (logs.length > 0) resultMsg += `\n\n詳細紀錄：\n` + logs.join("\n");
 
@@ -520,6 +618,8 @@ function clearAllData() {
       respSheet.getRange(5, 1, lastRow - 4, respSheet.getLastColumn()).clearContent();
     }
   }
+
+  PropertiesService.getDocumentProperties().deleteProperty("EXPORTED_CLASS_SHEETS_MAP");
 
   ui.alert("✅ 已成功清空所有報名資料與班級分頁！");
 }
@@ -640,104 +740,118 @@ function searchStudent(studentId) {
     studentInfo: studentInfo
   };
 }
-// 2. 儲存/更新報名資料 (避免重複寫入)
+// 2. 儲存/更新報名資料 (避免重複寫入，並即時同步至導師試算表)
 function saveRegistration(formData) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const respSheet = ss.getSheetByName("表單回復");
-  const classSheet = findClassSheet_(ss, formData.className);
-  const nowStr = Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm:ss");
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return { success: false, message: "系統目前較忙碌，請稍候幾秒再重新送出！" };
+  }
 
-  if (!respSheet || !classSheet) return { success: false, message: "資料表結構異常！" };
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const respSheet = ss.getSheetByName("表單回復");
+    const classSheet = findClassSheet_(ss, formData.className);
+    const nowStr = Utilities.formatDate(new Date(), "GMT+8", "yyyy/MM/dd HH:mm:ss");
 
-  // A. 寫入或更新「表單回復」分頁
-  const respLastCol = respSheet.getLastColumn();
-  const respHeaders = respSheet.getRange(4, 1, 1, respLastCol).getValues()[0];
-  const respTypes = respSheet.getRange(2, 1, 1, respLastCol).getValues()[0];
-  const rowData = [formData.className, formData.seatNo, formData.studentId, formData.name, nowStr];
-  const totalTitleSet = new Set();
+    if (!respSheet || !classSheet) return { success: false, message: "資料表結構異常！" };
 
-  // 依照題目順序填入答案（含總計欄位）
-  for (let c = 5; c < respHeaders.length; c++) {
-    const rawTitle = respHeaders[c];
-    const qTitle = String(rawTitle || "").trim();
-    const qType = String(respTypes[c] || "").trim();
-    if (isTotalCol({ title: qTitle, type: qType })) {
-      totalTitleSet.add(qTitle);
-      rowData.push(formData.totalAmount !== undefined ? formData.totalAmount : "");
+    // A. 寫入或更新「表單回復」分頁
+    const respLastCol = respSheet.getLastColumn();
+    const respHeaders = respSheet.getRange(4, 1, 1, respLastCol).getValues()[0];
+    const respTypes = respSheet.getRange(2, 1, 1, respLastCol).getValues()[0];
+    const rowData = [formData.className, formData.seatNo, formData.studentId, formData.name, nowStr];
+    const totalTitleSet = new Set();
+
+    // 依照題目順序填入答案（含總計欄位）
+    for (let c = 5; c < respHeaders.length; c++) {
+      const rawTitle = respHeaders[c];
+      const qTitle = String(rawTitle || "").trim();
+      const qType = String(respTypes[c] || "").trim();
+      if (isTotalCol({ title: qTitle, type: qType })) {
+        totalTitleSet.add(qTitle);
+        rowData.push(formData.totalAmount !== undefined ? formData.totalAmount : "");
+      } else {
+        const ans = formData.answers[rawTitle] !== undefined
+          ? formData.answers[rawTitle]
+          : (formData.answers[qTitle] !== undefined ? formData.answers[qTitle] : "");
+        rowData.push(ans);
+      }
+    }
+
+    // 尋找是否已存在「表單回復」中
+    let existingRespRow = -1;
+    if (respSheet.getLastRow() >= 5) {
+      const ids = respSheet.getRange(5, 3, respSheet.getLastRow() - 4, 1).getValues();
+      for (let r = 0; r < ids.length; r++) {
+        if (String(ids[r][0]).trim() === String(formData.studentId).trim()) {
+          existingRespRow = r + 5;
+          break;
+        }
+      }
+    }
+
+    if (existingRespRow !== -1) {
+      // 更新舊紀錄
+      respSheet.getRange(existingRespRow, 1, 1, rowData.length).setValues([rowData]);
     } else {
-      const ans = formData.answers[rawTitle] !== undefined
-        ? formData.answers[rawTitle]
-        : (formData.answers[qTitle] !== undefined ? formData.answers[qTitle] : "");
-      rowData.push(ans);
+      // 新增紀錄
+      respSheet.appendRow(rowData);
     }
-  }
 
-  // 尋找是否已存在「表單回復」中
-  let existingRespRow = -1;
-  if (respSheet.getLastRow() >= 5) {
-    const ids = respSheet.getRange(5, 3, respSheet.getLastRow() - 4, 1).getValues();
-    for (let r = 0; r < ids.length; r++) {
-      if (String(ids[r][0]).trim() === String(formData.studentId).trim()) {
-        existingRespRow = r + 5;
-        break;
-      }
-    }
-  }
+    // B. 同步更新「班級分頁」
+    const classLastRow = classSheet.getLastRow();
+    const classLastCol = classSheet.getLastColumn();
+    if (classLastRow > 1 && classLastCol > 0) {
+      const headerInfo = detectClassHeaderRow_(classSheet, classLastRow, classLastCol);
+      const trimmedHeaders = headerInfo.headers.map(h => String(h || "").trim());
+      const dataRowCount = classLastRow - headerInfo.rowIndex;
 
-  if (existingRespRow !== -1) {
-    // 更新舊紀錄
-    respSheet.getRange(existingRespRow, 1, 1, rowData.length).setValues([rowData]);
-  } else {
-    // 新增紀錄
-    respSheet.appendRow(rowData);
-  }
+      if (dataRowCount > 0) {
+        const classData = classSheet.getRange(headerInfo.rowIndex + 1, 1, dataRowCount, classLastCol).getValues();
+        let targetClassRow = -1;
+        const idColIdx = trimmedHeaders.indexOf("學號");
 
-  // B. 同步更新「班級分頁」
-  const classLastRow = classSheet.getLastRow();
-  const classLastCol = classSheet.getLastColumn();
-  if (classLastRow > 1 && classLastCol > 0) {
-    const headerInfo = detectClassHeaderRow_(classSheet, classLastRow, classLastCol);
-    const trimmedHeaders = headerInfo.headers.map(h => String(h || "").trim());
-    const dataRowCount = classLastRow - headerInfo.rowIndex;
-
-    if (dataRowCount > 0) {
-      const classData = classSheet.getRange(headerInfo.rowIndex + 1, 1, dataRowCount, classLastCol).getValues();
-      let targetClassRow = -1;
-      const idColIdx = trimmedHeaders.indexOf("學號");
-
-      if (idColIdx !== -1) {
-        for (let r = 0; r < classData.length; r++) {
-          if (String(classData[r][idColIdx]).trim() === String(formData.studentId).trim()) {
-            targetClassRow = r + headerInfo.rowIndex + 1;
-            break;
-          }
-        }
-      }
-
-      if (targetClassRow !== -1) {
-        const timeColIdx = findTimeColIndex_(trimmedHeaders) + 1;
-        if (timeColIdx > 0) classSheet.getRange(targetClassRow, timeColIdx).setValue(nowStr);
-
-        for (let qTitle in formData.answers) {
-          const colIdx = trimmedHeaders.indexOf(String(qTitle).trim()) + 1;
-          if (colIdx > 0) {
-            classSheet.getRange(targetClassRow, colIdx).setValue(formData.answers[qTitle]);
+        if (idColIdx !== -1) {
+          for (let r = 0; r < classData.length; r++) {
+            if (String(classData[r][idColIdx]).trim() === String(formData.studentId).trim()) {
+              targetClassRow = r + headerInfo.rowIndex + 1;
+              break;
+            }
           }
         }
 
-        if (formData.totalAmount !== undefined) {
-          for (let c = 0; c < trimmedHeaders.length; c++) {
-            const h = trimmedHeaders[c];
-            if (h && (totalTitleSet.has(h) || isTotalCol({ title: h }))) {
-              classSheet.getRange(targetClassRow, c + 1).setValue(formData.totalAmount);
+        if (targetClassRow !== -1) {
+          const timeColIdx = findTimeColIndex_(trimmedHeaders) + 1;
+          if (timeColIdx > 0) classSheet.getRange(targetClassRow, timeColIdx).setValue(nowStr);
+
+          for (let qTitle in formData.answers) {
+            const colIdx = trimmedHeaders.indexOf(String(qTitle).trim()) + 1;
+            if (colIdx > 0) {
+              classSheet.getRange(targetClassRow, colIdx).setValue(formData.answers[qTitle]);
+            }
+          }
+
+          if (formData.totalAmount !== undefined) {
+            for (let c = 0; c < trimmedHeaders.length; c++) {
+              const h = trimmedHeaders[c];
+              if (h && (totalTitleSet.has(h) || isTotalCol({ title: h }))) {
+                classSheet.getRange(targetClassRow, c + 1).setValue(formData.totalAmount);
+              }
             }
           }
         }
       }
     }
-  }
 
-  return { success: true, isUpdate: existingRespRow !== -1 };
+    // C. 即時同步更新已匯出的導師獨立試算表
+    try {
+      syncExportedClassSheet_(classSheet);
+    } catch (syncErr) {}
+
+    return { success: true, isUpdate: existingRespRow !== -1 };
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
 }
 
 // 提交報名資料
@@ -810,6 +924,9 @@ function submitForm(payload) {
     }
 
     classSheet.getRange(payload.rowIndex, startCol, 1, classUpdateValues.length).setValues([classUpdateValues]);
+    try {
+      syncExportedClassSheet_(classSheet);
+    } catch (syncErr) {}
   }
 
   return { success: true, totalAmount: totalAmount };
